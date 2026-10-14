@@ -21,7 +21,7 @@ test.compile(v_flags2=[
     "--CFLAGS -O0",
     "-Wno-fatal",
     "+incdir+t/uvm",  #
-    "+define+UVM_NO_DPI",
+    #"+define+UVM_NO_DPI",
     "t/uvm/uvm_pkg_all_v2017_1_0_nodpi.svh",
     test.pli_filename
 ])
