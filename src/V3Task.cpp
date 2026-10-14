@@ -197,6 +197,12 @@ private:
     // target method as needing a non-inline CFunc and record the runtime
     // dispatch targets (iface __Viftop handle VarScope -> that clone).
     void markVirtIfaceTargets() {
+        UINFO(0, "markVirtIfaceTargets: " << m_virtIfaceRefs.size() << " viface refs, "
+                 << m_ifaceHandleVscpMap.size() << " iface handle vscps");
+        for (const auto& it : m_ifaceHandleVscpMap)
+            UINFO(0, "  handlevscp scope=" << it.first->name()
+                     << " vscp=" << it.second->name());
+
         for (AstNodeFTaskRef* const refp : m_virtIfaceRefs) {
             const AstMethodCall* const mrefp = VN_AS(refp, MethodCall);
             const AstIfaceRefDType* const ifrefp
@@ -204,21 +210,38 @@ private:
             const AstIface* const ifacep = ifrefp->ifaceViaCellp();
             std::vector<std::pair<AstVarScope*, AstNodeFTask*>> targets;
             for (V3GraphVertex& vtx : m_callGraph.vertices()) {
-                TaskFTaskVertex* const ftVtxp = vtx.cast<TaskFTaskVertex>();
-                if (!ftVtxp) continue;
-                AstNodeFTask* const ftaskp = ftVtxp->nodep();
-                if (ftaskp->name() != refp->name()) continue;
+                 TaskFTaskVertex* const ftVtxp = vtx.cast<TaskFTaskVertex>();
+                 if (!ftVtxp) continue;
+                 AstNodeFTask* const ftaskp = ftVtxp->nodep();
+                 if (ftaskp->name() != refp->name()) continue;
+                 AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope);
+                UINFO(0, "  cand " << ftaskp->name()
+                         << " user3p=" << (ftaskp->user3p() ? "set" : "null")
+                         << " scope=" << (scopep ? scopep->name() : "null")
+                         << " mod=" << (scopep && scopep->modp()
+                                          ? scopep->modp()->name() : "null")
+                         << " isIface="
+                         << (scopep && VN_IS(scopep->modp(), Iface) ? "y" : "n")
+                         << " want=" << ifacep->name());
+                if (!scopep) {UINFO(0, " scopep does not exist"); continue;}
+                if (!VN_IS(scopep->modp(), Iface)) continue;
+                if (scopep->modp()->name() != ifacep->name()) continue;
+                ftVtxp->needsNonInlineCFunc(true);
 
-                if (AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope)) {
-                    if (!VN_IS(scopep->modp(), Iface)) continue;
-                    if (scopep->modp()->name() != ifacep->name()) continue;
-                    ftVtxp->needsNonInlineCFunc(true);
-                    const auto hit = m_ifaceHandleVscpMap.find(scopep);
-                    targets.emplace_back(hit->second, ftaskp);
+                const auto hit = m_ifaceHandleVscpMap.find(scopep);
+                if (hit == m_ifaceHandleVscpMap.end()) {
+                    UINFO(0, "    no __Viftop vscp for scope "
+                                 << scopep->name());
+                    continue;
                 }
-            }
+                UINFO(0, " before emplace: targets.size() = " << targets.size());
+                targets.emplace_back(hit->second, ftaskp);
+                UINFO(0, " after emplace: targets.size() = " << targets.size());
+
+            UINFO(0, "  ref " << refp->name() << " targets=" << targets.size());
             if (targets.size() > 1) m_virtIfaceTargetsMap[refp] = std::move(targets);
-            UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call");
+            UINFO(0, "targets.size() = " << targets.size());
+            UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call. targets.size() = " << targets.size());
         }
     }
 
@@ -289,17 +312,20 @@ private:
                     UINFO(9, "   funcvsc " << vscp);
                     m_varToScopeMap.emplace(std::make_pair(nodep, varp), vscp);
                 }
-            }
-        }
-        if (VN_IS(nodep->modp(), Iface)) {
-            // The __Viftop companion var's VarScope lives under the iface's
-            // inner scope (see V3Scope visit(AstVar)).
-            for (AstNode* stmtp = nodep->varsp(); stmtp; stmtp = stmtp->nextp()) {
-                if (AstVarScope* const vscp = VN_CAST(stmtp, VarScope)) {
-                    if (vscp->varp()->isIfaceRef()) m_ifaceHandleVscpMap[nodep] = vscp;
+                if (varp->isIfaceParent()) {
+                    m_ifaceHandleVscpMap[vscp->scopep()] = vscp;
                 }
             }
         }
+        //if (VN_IS(nodep->modp(), Iface)) {
+        //    // The __Viftop companion var's VarScope lives under the iface's
+        //    // inner scope (see V3Scope visit(AstVar)).
+        //    for (AstNode* stmtp = nodep->varsp(); stmtp; stmtp = stmtp->nextp()) {
+        //        if (AstVarScope* const vscp = VN_CAST(stmtp, VarScope)) {
+        //            if (vscp->varp()->isIfaceRef()) m_ifaceHandleVscpMap[nodep] = vscp;
+        //        }
+        //    }
+        //}
         // Likewise, all FTask->scope mappings
         for (AstNode* stmtp = nodep->blocksp(); stmtp; stmtp = stmtp->nextp()) {
             if (AstNodeFTask* const taskp = VN_CAST(stmtp, NodeFTask)) taskp->user3p(nodep);
@@ -318,7 +344,6 @@ private:
             taskVtxp->needsNonInlineCFunc(true);
             m_virtIfaceRefs.push_back(nodep);
         }
-        if (isVirtualIfaceMethodCall(nodep)) taskVtxp->needsNonInlineCFunc(true);
         // Do we have to disable inlining the function?
         const V3TaskConnects tconnects = V3Task::taskConnects(nodep, nodep->taskp()->stmtsp());
         if (!taskVtxp->noInline()) {  // Else short-circuit below
@@ -929,6 +954,8 @@ class TaskVisitor final : public VNVisitor {
                 lastp = newIfp;
             }
             mcallp->funcp(m_statep->ftaskCFuncp(vtargetsp->back().second));
+            UASSERT_OBJ(mcallp->funcp(), refp,
+                        "no CFunc for last virtual iface dispatch target");
             lastp->addElsesp(mcallp->makeStmt());
             // Replace the call stmt with the dispatch chain; the now-empty
             // stmt wrapper is deleted (the call moved into the else branch).
