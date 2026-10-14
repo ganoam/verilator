@@ -106,6 +106,9 @@ class CombineVisitor final : VNVisitor {
                 AstCFunc* newp = funcp;
                 UASSERT_OBJ(!oldp->user2(), oldp, "Should have been removed from dupFinder");
 
+                UINFO(0, "combine: merging CFunc '" << oldp->name()
+                         << "' into '" << newp->name() << "'");
+
                 // Swap them, if the duplicate is earlier in the list of functions. This is
                 // necessary because replacing a call site in a later function might have made that
                 // function equivalent to an earlier function, but we want the first equivalent
