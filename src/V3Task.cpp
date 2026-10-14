@@ -112,6 +112,10 @@ class TaskStateVisitor final : public VNVisitor {
     // TYPES
     using VarToScopeMap = std::map<std::pair<AstScope*, AstVar*>, AstVarScope*>;
     using FuncToClassMap = std::unordered_map<const AstNodeFTask*, AstClass*>;
+    using ScopeToVarScopeMap = std::map<const AstScope*, AstVarScope*>;
+    using IfaceMethodToFtaskCloneMap = std::map<std::pair<const AstIface*, std::string>, std::vector<AstNodeFTask*>>;
+    using CallRefToAllVarScopeFtaskPairsMap = std::map<const AstNodeFTaskRef*,
+             std::vector<std::pair<AstVarScope*, AstNodeFTask*>>>;
     // MEMBERS
     VarToScopeMap m_varToScopeMap;  // Map for Var -> VarScope mappings
     FuncToClassMap m_funcToClassMap;  // Map for ctor func -> class
@@ -122,6 +126,10 @@ class TaskStateVisitor final : public VNVisitor {
     std::vector<AstInitialAutomatic*> m_initialps;  // Initial blocks to move
     bool m_underPortVar = false;  // Visiting under a port AstVar; any expression there
                                   // is a default value, evaluated at call sites only
+
+    ScopeToVarScopeMap m_ifaceHandleVscpMap;   // Map for iface scope -> VarScope of its __Viftop handle var
+    IfaceMethodToFtaskCloneMap m_ifaceFTasksMap;  // Map for (iface, method name) -> all per-scope ftask clones
+    CallRefToAllVarScopeFtaskPairsMap  m_virtIfaceTargetsMap; // Map for call ref -> {handle vscp, per-scope ftask} dispatch targets
 
 public:
     // METHODS
@@ -164,6 +172,12 @@ public:
     }
     // Returns pointer to node that makes the given FTask impure
     AstNode* checkImpure(AstNodeFTask* nodep) { return getFTaskVertex(nodep)->impureNode(); }
+
+    const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>* virtIfaceTargets(
+        const AstNodeFTaskRef* refp) const {
+        const auto it = m_virtIfaceTargetsMap.find(refp);
+        return it == m_virtIfaceTargetsMap.end() ? nullptr : &it->second;
+}
 
 private:
     TaskFTaskVertex* getFTaskVertex(AstNodeFTask* nodep) {
@@ -237,10 +251,26 @@ private:
                     m_varToScopeMap.emplace(std::make_pair(nodep, varp), vscp);
                 }
             }
+            if (VN_IS(nodep->modp(), Iface)) {
+                for (AstNode* stmtp = nodep->varsp(); stmtp; stmtp = stmtp->nextp()) {
+                    if (AstVarScope* const vscp = VN_CAST(stmtp, VarScope)) {
+                        if (vscp->varp()->isIfaceRef()) {
+                            // The __Viftop companion var's VarScope lives under the
+                            // iface's inner scope (see V3Scope visit(AstVar)).
+                            m_ifaceHandleVscpMap[nodep] = vscp;
+                        }
+                    }
+                }
+            }
         }
         // Likewise, all FTask->scope mappings
         for (AstNode* stmtp = nodep->blocksp(); stmtp; stmtp = stmtp->nextp()) {
-            if (AstNodeFTask* const taskp = VN_CAST(stmtp, NodeFTask)) taskp->user3p(nodep);
+            if (AstNodeFTask* const taskp = VN_CAST(stmtp, NodeFTask)) {
+                taskp->user3p(nodep);  // existing
+                if (const AstIface* const ifacep = VN_CAST(nodep->modp(), Iface)) {
+                    m_ifaceFTasksMap[std::make_pair(ifacep, taskp->name())].push_back(taskp);
+                }
+            }
         }
         iterateChildren(nodep);
     }
@@ -249,9 +279,26 @@ private:
         UASSERT_OBJ(nodep->taskp(), nodep, "Unlinked task");
         TaskFTaskVertex* const taskVtxp = getFTaskVertex(nodep->taskp());
         new TaskEdge{&m_callGraph, m_curVxp, taskVtxp};
-        // Virtual-interface method calls dispatch through a runtime handle and
-        // must not be inlined.
-        if (isVirtualIfaceMethodCall(nodep)) taskVtxp->needsNonInlineCFunc(true);
+        if (isVirtualIfaceMethodCall(nodep)) {
+            // The call dispatches at run time, so *every* per-scope clone of this
+            // ftask needs its own non-inlined CFunc, each living under its own
+            // interface-instance scope (so %m etc. resolve per instance).
+            const AstMethodCall* const mrefp = VN_AS(nodep, MethodCall);
+            const AstIfaceRefDType* const ifrefp
+                = VN_AS(mrefp->fromp()->dtypep()->skipRefp(), IfaceRefDType);
+            const AstIface* const ifacep = ifrefp->ifaceViaCellp();
+            const auto it = m_ifaceFTasksMap.find(std::make_pair(ifacep, mrefp->name()));
+            UASSERT_OBJ(it != m_ifaceFTasksMap.end(), nodep, "no iface ftask clones");
+            std::vector<std::pair<AstVarScope*, AstNodeFTask*>> targets;
+            for (AstNodeFTask* const ftaskp : it->second) {
+                getFTaskVertex(ftaskp)->needsNonInlineCFunc(true);
+                AstScope* const scopep = getScope(ftaskp);  // user3p already stamped
+                const auto hit = m_ifaceHandleVscpMap.find(scopep);
+                if (hit != m_ifaceHandleVscpMap.end()) targets.emplace_back(hit->second, ftaskp);
+            }
+            if (targets.size() > 1) m_virtIfaceTargetsMap[nodep] = std::move(targets);
+        }
+
         // Do we have to disable inlining the function?
         const V3TaskConnects tconnects = V3Task::taskConnects(nodep, nodep->taskp()->stmtsp());
         if (!taskVtxp->noInline()) {  // Else short-circuit below
@@ -765,7 +812,7 @@ class TaskVisitor final : public VNVisitor {
         return beginp;
     }
 
-    AstNode* createNonInlinedFTask(AstNodeFTaskRef* refp, AstVarScope* outvscp, AstCNew*& cnewpr) {
+    AstNode* createNonInlinedFTask(AstNodeFTaskRef* refp, AstVarScope* outvscp, AstCNew*& cnewpr, bool virtualIfaceCall) {
         // outvscp is the variable for functions only, if nullptr, it's a task
         UASSERT_OBJ(refp->taskp(), refp, "Unlinked?");
         AstCFunc* const cfuncp = m_statep->ftaskCFuncp(refp->taskp());
@@ -774,6 +821,7 @@ class TaskVisitor final : public VNVisitor {
         AstNode* const beginp
             = new AstComment{refp->fileline(), "Function: "s + refp->name(), true};
         AstNodeCCall* ccallp;
+        const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>* vtargetsp = virtualIfaceCall ? m_statep->virtIfaceTargets(refp) : nullptr;
         if (VN_IS(refp, New)) {
             AstCNew* const cnewp = new AstCNew{refp->fileline(), cfuncp};
             cnewp->dtypep(refp->dtypep());
@@ -830,6 +878,39 @@ class TaskVisitor final : public VNVisitor {
         }
 
         if (outvscp) ccallp->addArgsp(new AstVarRef{refp->fileline(), outvscp, VAccess::WRITE});
+
+        if (vtargetsp && VN_IS(ccallp, CMethodCall)) {
+            // Dispatch on the runtime vif handle: 'vif == <instance handle>' picks
+            // that instance's own CFunc, whose %m/scope context is correct.
+            AstCMethodCall* const mcallp = VN_AS(ccallp, CMethodCall);
+            AstIf* ifp = nullptr;
+            AstIf* lastp = nullptr;
+            FileLine* const flp = refp->fileline();
+            for (size_t i = 0; i + 1 < vtargetsp->size(); ++i) {
+                AstVarScope* const handleVscp = (*vtargetsp)[i].first;
+                AstCFunc* const icfuncp = m_statep->ftaskCFuncp((*vtargetsp)[i].second);
+                UASSERT_OBJ(icfuncp, (*vtargetsp)[i].second, "no per-scope cfunc");
+                AstCMethodCall* const callp = mcallp->cloneTree(false);
+                callp->funcp(icfuncp);
+                AstVarRef* const hrefp = new AstVarRef{flp, handleVscp, VAccess::READ};
+                hrefp->dtypep(handleVscp->varp()->dtypep());
+                AstEq* const condp
+                    = new AstEq{flp, callp->fromp()->cloneTree(false), hrefp};
+                condp->dtypeSetBit();
+                AstIf* const newIfp = new AstIf{flp, condp};
+                newIfp->addThensp(callp->makeStmt());
+                if (lastp) lastp->addElsesp(newIfp); else ifp = newIfp;
+                lastp = newIfp;
+            }
+            // Final else (or the whole body if one target): the bound taskp's cfunc
+            AstCFunc* const lastFuncp = m_statep->ftaskCFuncp(vtargetsp->back().second);
+            mcallp->funcp(lastFuncp);
+            if (lastp) lastp->addElsesp(mcallp->makeStmt());
+            // Replace the single call stmt that was added at :786 with the chain.
+            // (Remove ccallp's makeStmt from beginp's next list, insert ifp.)
+            beginp->nextp()->replaceWith(ifp);
+        }
+
 
         if (debug() >= 9) beginp->dumpTreeAndNext(cout, "-  nitask: ");
         return beginp;
@@ -1681,7 +1762,7 @@ class TaskVisitor final : public VNVisitor {
         if (m_statep->ftaskNoInline(nodep->taskp()) || virtualIfaceCall) {
             processArgs(nodep);
             // This may share VarScope's with a public task, if any.  Yuk.
-            beginp = createNonInlinedFTask(nodep, outvscp, cnewp /*ref*/);
+            beginp = createNonInlinedFTask(nodep, outvscp, cnewp /*ref*/, virtualIfaceCall);
         } else {
             beginp = createInlinedFTask(nodep, outvscp);
             ++m_statInlines;
