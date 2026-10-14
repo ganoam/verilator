@@ -999,6 +999,12 @@ class TaskVisitor final : public VNVisitor {
             VL_DO_DANGLING(pushDeletep(callStmtp), callStmtp);
         }
 
+
+        UINFO(0, "  nitask '" << refp->name() << "' vtargets="
+                 << (vtargetsp ? cvtToStr(vtargetsp->size()) : string{"null"})
+                 << " callStmtp=" << (callStmtp ? "set" : "null"));
+        if (debug() >= 9 || vtargetsp) beginp->dumpTreeAndNext(cout, "-  nitask: ");
+
         if (debug() >= 9) beginp->dumpTreeAndNext(cout, "-  nitask: ");
         return beginp;
     }
@@ -2132,6 +2138,7 @@ class TaskVisitor final : public VNVisitor {
                 if (nodep->isConstructor()) m_statep->remapFuncClassp(nodep, clonedFuncp);
                 const bool makeNonInlineFunc = noInline || needsNonInlineCFunc;
                 if (AstCFunc* const cfuncp = makeUserFunc(clonedFuncp, makeNonInlineFunc)) {
+                    if (TaskStateVisitor::isIfaceFTaskScope(m_scopep)) cfuncp->dontCombine(true);
                     nodep->addNextHere(cfuncp);
                     if (nodep->dpiImport() || makeNonInlineFunc) {
                         m_statep->ftaskCFuncp(nodep, cfuncp);
