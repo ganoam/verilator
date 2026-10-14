@@ -113,8 +113,8 @@ class TaskStateVisitor final : public VNVisitor {
     using VarToScopeMap = std::map<std::pair<AstScope*, AstVar*>, AstVarScope*>;
     using FuncToClassMap = std::unordered_map<const AstNodeFTask*, AstClass*>;
     using ScopeToVarScopeMap = std::map<const AstScope*, AstVarScope*>;
-    using CallRefToVarScopeFtaskPairsMap
-        = std::map<const AstNodeFTaskRef*, std::vector<std::pair<AstVarScope*, AstNodeFTask*>>>;
+    using TaskToVarScopeFtaskPairsMap
+        = std::map<const AstNodeFTask*, std::vector<std::pair<AstVarScope*, AstNodeFTask*>>>;
     // MEMBERS
     VarToScopeMap m_varToScopeMap;  // Map for Var -> VarScope mappings
     FuncToClassMap m_funcToClassMap;  // Map for ctor func -> class
@@ -134,7 +134,7 @@ class TaskStateVisitor final : public VNVisitor {
     // A virtual-interface method call is an exception to the "one ftask per
     // scope" rule: one AstNodeFTaskRef may dispatch to ftask clones under
     // several interface-instance scopes.
-    CallRefToVarScopeFtaskPairsMap m_virtIfaceTargetsMap;
+    TaskToVarScopeFtaskPairsMap m_virtIfaceTargetsMap;
 
 public:
     // METHODS
@@ -181,7 +181,7 @@ public:
     // interface method call, or nullptr if no dispatch chain is needed.
     const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>* virtIfaceTargets(
         const AstNodeFTaskRef* refp) const {
-        const auto it = m_virtIfaceTargetsMap.find(refp);
+        const auto it = m_virtIfaceTargetsMap.find(refp->taskp());
         return it == m_virtIfaceTargetsMap.end() ? nullptr : &it->second;
     }
 
@@ -272,7 +272,7 @@ private:
              UINFO(0, "  ref " << refp->name() << " targets=" << targets.size());
             // Assert BEFORE the std::move empties 'targets'
             UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call");
-            if (targets.size() > 1) m_virtIfaceTargetsMap[refp] = std::move(targets);
+            if (targets.size() > 1) m_virtIfaceTargetsMap[refp->taskp()] = std::move(targets);
         }
     }
 
@@ -906,6 +906,8 @@ class TaskVisitor final : public VNVisitor {
         AstNode* callStmtp = nullptr;  // Stmt wrapper of ccallp, for dispatch replace
         const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>* const vtargetsp
             = virtualIfaceCall ? m_statep->virtIfaceTargets(refp) : nullptr;
+        UINFO(0, "  lookup '" << refp->name() << "' refp=" << refp
+                 << " -> " << (vtargetsp ? cvtToStr(vtargetsp->size()) : "null"));
         if (VN_IS(refp, New)) {
             AstCNew* const cnewp = new AstCNew{refp->fileline(), cfuncp};
             cnewp->dtypep(refp->dtypep());
@@ -981,6 +983,7 @@ class TaskVisitor final : public VNVisitor {
                 AstVarRef* const hrefp = new AstVarRef{flp, handleVscp, VAccess::READ};
                 hrefp->dtypep(handleVscp->varp()->dtypep());
                 AstEq* const condp = new AstEq{flp, callp->fromp()->cloneTree(false), hrefp};
+
                 condp->dtypeSetBit();
                 AstIf* const newIfp = new AstIf{flp, condp};
                 newIfp->addThensp(callp->makeStmt());
@@ -988,14 +991,16 @@ class TaskVisitor final : public VNVisitor {
                 else ifp = newIfp;
                 lastp = newIfp;
             }
-            mcallp->funcp(m_statep->ftaskCFuncp(vtargetsp->back().second));
-            UASSERT_OBJ(mcallp->funcp(), refp,
-                        "no CFunc for last virtual iface dispatch target");
+            // Last target becomes the final 'else' branch using the original call
+            AstCFunc* const lastCFuncp
+                = m_statep->ftaskCFuncp(vtargetsp->back().second);
+            UASSERT_OBJ(lastCFuncp, vtargetsp->back().second, "no per-scope cfunc");
+            mcallp->funcp(lastCFuncp);
             lastp->addElsesp(mcallp->makeStmt());
-            // Replace the call stmt with the dispatch chain; the now-empty
-            // stmt wrapper is deleted (the call moved into the else branch).
+            // Replace the original call statement with the dispatch chain;
+            // the old AstExprStmt wrapper node is dead once unlinked
             callStmtp->replaceWith(ifp);
-            VL_DO_DANGLING(pushDeletep(callStmtp), callStmtp);
+            pushDeletep(callStmtp);
         }
 
 
@@ -1851,6 +1856,11 @@ class TaskVisitor final : public VNVisitor {
         const bool virtualIfaceCall
             = TaskStateVisitor::isVirtualIfaceMethodCall(nodep)
               && TaskStateVisitor::isIfaceFTaskScope(m_statep->getScope(nodep->taskp()));
+        UINFO(0, "  ref '" << nodep->name() << "' vicall=" << (int)virtualIfaceCall
+                 << " isVIM=" << (int)TaskStateVisitor::isVirtualIfaceMethodCall(nodep)
+                 << " taskscope=" << m_statep->getScope(nodep->taskp())->name()
+                 << " noInline=" << (int)m_statep->ftaskNoInline(nodep->taskp()));
+
         if (m_statep->ftaskNoInline(nodep->taskp()) || virtualIfaceCall) {
             processArgs(nodep);
             // This may share VarScope's with a public task, if any.  Yuk.
