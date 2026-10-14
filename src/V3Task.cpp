@@ -996,13 +996,11 @@ class TaskVisitor final : public VNVisitor {
                 = m_statep->ftaskCFuncp(vtargetsp->back().second);
             UASSERT_OBJ(lastCFuncp, vtargetsp->back().second, "no per-scope cfunc");
             mcallp->funcp(lastCFuncp);
-            lastp->addElsesp(mcallp->makeStmt());
-            // Replace the original call statement with the dispatch chain;
-            // the old AstExprStmt wrapper node is dead once unlinked
+            // Swap in the dispatch chain, then reuse the original AstExprStmt
+            // (holding mcallp) as the else branch — it is free after replaceWith
             callStmtp->replaceWith(ifp);
-            pushDeletep(callStmtp);
+            lastp->addElsesp(callStmtp);
         }
-
 
         UINFO(0, "  nitask '" << refp->name() << "' vtargets="
                  << (vtargetsp ? cvtToStr(vtargetsp->size()) : string{"null"})
