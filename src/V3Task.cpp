@@ -208,19 +208,17 @@ private:
                 if (!ftVtxp) continue;
                 AstNodeFTask* const ftaskp = ftVtxp->nodep();
                 if (ftaskp->name() != refp->name()) continue;
-                AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope);
-                if (!scopep || scopep->modp() != ifacep) continue;
-                ftVtxp->needsNonInlineCFunc(true);
-                const auto hit = m_ifaceHandleVscpMap.find(scopep);
-                if (hit != m_ifaceHandleVscpMap.end()) {
+
+                if (AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope)) {
+                    if (!VN_IS(scopep->modp(), Iface)) continue;
+                    if (scopep->modp()->name() != ifacep->name()) continue;
+                    ftVtxp->needsNonInlineCFunc(true);
+                    const auto hit = m_ifaceHandleVscpMap.find(scopep);
                     targets.emplace_back(hit->second, ftaskp);
                 }
-                UINFO(0, "  cand " << ftaskp->name() << " scope mod="
-                      << (scopep ? scopep->modp()->name() : "null")
-                      << " want=" << ifacep->name());
             }
-            UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call");
             if (targets.size() > 1) m_virtIfaceTargetsMap[refp] = std::move(targets);
+            UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call");
         }
     }
 
