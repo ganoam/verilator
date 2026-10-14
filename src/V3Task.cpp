@@ -202,18 +202,40 @@ private:
         for (const auto& it : m_ifaceHandleVscpMap)
             UINFO(0, "  handlevscp scope=" << it.first->name()
                      << " vscp=" << it.second->name());
-
+        // Dump every ftask vertex once: names + scope, so we can see whether
+        // e.g. 'probe' clones exist, were renamed (__Vtcwrap), or lack user3p
+        for (V3GraphVertex& vtx : m_callGraph.vertices()) {
+            if (TaskFTaskVertex* const ftVtxp = vtx.cast<TaskFTaskVertex>()) {
+                AstNodeFTask* const ftaskp = ftVtxp->nodep();
+                const AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope);
+                UINFO(0, "  vtx ftask '" << ftaskp->name() << "'"
+                         << " user3p=" << (ftaskp->user3p() ? "set" : "null")
+                         << (scopep ? " scope=" + scopep->name() : "")
+                         << (scopep && scopep->modp()
+                                 ? " mod=" + scopep->modp()->name()
+                                     + (VN_IS(scopep->modp(), Iface) ? "(Iface)" : "")
+                                 : ""));
+            }
+        }
         for (AstNodeFTaskRef* const refp : m_virtIfaceRefs) {
             const AstMethodCall* const mrefp = VN_AS(refp, MethodCall);
             const AstIfaceRefDType* const ifrefp
                 = VN_AS(mrefp->fromp()->dtypep()->skipRefp(), IfaceRefDType);
             const AstIface* const ifacep = ifrefp->ifaceViaCellp();
+            UINFO(0, "  ref '" << refp->name() << "' taskp='" << refp->taskp()->name()
+                     << "' iface=" << (ifacep ? ifacep->name() : string{"NULL"}));
             std::vector<std::pair<AstVarScope*, AstNodeFTask*>> targets;
             for (V3GraphVertex& vtx : m_callGraph.vertices()) {
                  TaskFTaskVertex* const ftVtxp = vtx.cast<TaskFTaskVertex>();
                  if (!ftVtxp) continue;
                  AstNodeFTask* const ftaskp = ftVtxp->nodep();
-                 if (ftaskp->name() != refp->name()) continue;
+                if (ftaskp->name() != refp->name()) {
+                    if (ftaskp->name().find(refp->name()) != string::npos
+                        || refp->name().find(ftaskp->name()) != string::npos)
+                        UINFO(0, "    near-miss name: ftask='" << ftaskp->name()
+                                 << "' ref='" << refp->name() << "'");
+                    continue;
+                }
                  AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope);
                 UINFO(0, "  cand " << ftaskp->name()
                          << " user3p=" << (ftaskp->user3p() ? "set" : "null")
@@ -223,9 +245,21 @@ private:
                          << " isIface="
                          << (scopep && VN_IS(scopep->modp(), Iface) ? "y" : "n")
                          << " want=" << ifacep->name());
-                if (!scopep) {UINFO(0, " scopep does not exist"); continue;}
-                if (!VN_IS(scopep->modp(), Iface)) continue;
-                if (scopep->modp()->name() != ifacep->name()) continue;
+                if (!scopep) {
+                    UINFO(0, "    cand '" << ftaskp->name() << "' dropped: no user3p scope");
+                    continue;
+                }
+                if (!VN_IS(scopep->modp(), Iface)) {
+                    UINFO(0, "    cand '" << ftaskp->name() << "' dropped: modp="
+                             << (scopep->modp() ? scopep->modp()->name() : string{"null"})
+                             << " not Iface");
+                    continue;
+                }
+                if (scopep->modp()->name() != ifacep->name()) {
+                    UINFO(0, "    cand '" << ftaskp->name() << "' dropped: mod name='"
+                             << scopep->modp()->name() << "' want='" << ifacep->name() << "'");
+                    continue;
+                }
                 ftVtxp->needsNonInlineCFunc(true);
 
                 const auto hit = m_ifaceHandleVscpMap.find(scopep);
@@ -234,14 +268,12 @@ private:
                                  << scopep->name());
                     continue;
                 }
-                UINFO(0, " before emplace: targets.size() = " << targets.size());
                 targets.emplace_back(hit->second, ftaskp);
-                UINFO(0, " after emplace: targets.size() = " << targets.size());
-
-            UINFO(0, "  ref " << refp->name() << " targets=" << targets.size());
+             }
+             UINFO(0, "  ref " << refp->name() << " targets=" << targets.size());
+            // Assert BEFORE the std::move empties 'targets'
+            UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call");
             if (targets.size() > 1) m_virtIfaceTargetsMap[refp] = std::move(targets);
-            UINFO(0, "targets.size() = " << targets.size());
-            UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call. targets.size() = " << targets.size());
         }
     }
 
@@ -317,18 +349,15 @@ private:
                 }
             }
         }
-        //if (VN_IS(nodep->modp(), Iface)) {
-        //    // The __Viftop companion var's VarScope lives under the iface's
-        //    // inner scope (see V3Scope visit(AstVar)).
-        //    for (AstNode* stmtp = nodep->varsp(); stmtp; stmtp = stmtp->nextp()) {
-        //        if (AstVarScope* const vscp = VN_CAST(stmtp, VarScope)) {
-        //            if (vscp->varp()->isIfaceRef()) m_ifaceHandleVscpMap[nodep] = vscp;
-        //        }
-        //    }
-        //}
         // Likewise, all FTask->scope mappings
         for (AstNode* stmtp = nodep->blocksp(); stmtp; stmtp = stmtp->nextp()) {
             if (AstNodeFTask* const taskp = VN_CAST(stmtp, NodeFTask)) taskp->user3p(nodep);
+            if (AstNodeFTask* const taskp = VN_CAST(stmtp, NodeFTask)) {
+                taskp->user3p(nodep);
+                if (VN_IS(nodep->modp(), Iface))
+                     UINFO(0, "  stamp iface ftask '" << taskp->name()
+                             << "' scope=" << nodep->name());
+            }
         }
         iterateChildren(nodep);
     }
@@ -343,6 +372,13 @@ private:
         if (isVirtualIfaceMethodCall(nodep)) {
             taskVtxp->needsNonInlineCFunc(true);
             m_virtIfaceRefs.push_back(nodep);
+            const AstMethodCall* const mcallp = VN_AS(nodep, MethodCall);
+            UINFO(0, "  viface ref '" << nodep->name()
+                     << "' taskscope="
+                     << (nodep->taskp()->user3p()
+                             ? VN_AS(nodep->taskp()->user3p(), Scope)->name()
+                             : string{"NULL"})
+                     << " fromdt=" << mcallp->fromp()->dtypep()->skipRefp()->typeName());
         }
         // Do we have to disable inlining the function?
         const V3TaskConnects tconnects = V3Task::taskConnects(nodep, nodep->taskp()->stmtsp());
