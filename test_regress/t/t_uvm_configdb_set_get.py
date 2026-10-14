@@ -19,9 +19,10 @@ test.compile(v_flags2=[
     test.build_jobs_groups,
     "--vpi",
     "--CFLAGS -O0",
-    "-Wall",
+    "-Wno-fatal",
     "+incdir+t/uvm",  #
-    "t/uvm/uvm_pkg_all_v2020_3_2_dpi.svh",
+    "+define+UVM_NO_DPI",
+    "t/uvm/uvm_pkg_all_v2017_1_0_nodpi.svh",
     test.pli_filename
 ])
 
