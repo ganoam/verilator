@@ -114,8 +114,8 @@ class TaskStateVisitor final : public VNVisitor {
     using VarToScopeMap = std::map<std::pair<AstScope*, AstVar*>, AstVarScope*>;
     using FuncToClassMap = std::unordered_map<const AstNodeFTask*, AstClass*>;
     using ScopeToVarScopeMap = std::map<const AstScope*, AstVarScope*>;
-    using TaskToVarScopeFtaskPairsMap
-        = std::map<const AstNodeFTask*, std::vector<std::pair<AstVarScope*, AstNodeFTask*>>>;
+    using RefToVarScopeFtaskPairsMap
+      = std::map<const AstNodeFTaskRef*, std::vector<std::pair<AstVarScope*, AstNodeFTask*>>>;
     // MEMBERS
     VarToScopeMap m_varToScopeMap;  // Map for Var -> VarScope mappings
     FuncToClassMap m_funcToClassMap;  // Map for ctor func -> class
@@ -126,16 +126,12 @@ class TaskStateVisitor final : public VNVisitor {
     std::vector<AstInitialAutomatic*> m_initialps;  // Initial blocks to move
     bool m_underPortVar = false;  // Visiting under a port AstVar; any expression there
                                   // is a default value, evaluated at call sites only
-                                  //
-    // Iface scope -> VarScope of its __Viftop handle var
-    ScopeToVarScopeMap m_ifaceHandleVscpMap;
-    // Virtual-interface method call refs seen during traversal
-    std::vector<AstNodeFTaskRef*> m_virtIfaceRefs;
-    // Call ref -> {handle vscp, per-scope ftask} runtime dispatch targets.
-    // A virtual-interface method call is an exception to the "one ftask per
-    // scope" rule: one AstNodeFTaskRef may dispatch to ftask clones under
-    // several interface-instance scopes.
-    TaskToVarScopeFtaskPairsMap m_virtIfaceTargetsMap;
+    std::vector<AstNodeFTaskRef*> m_virtIfaceRefs; // Virtual-interface method call refs seen during traversal
+    ScopeToVarScopeMap m_ifaceHandleVscpMap; // Iface scope -> VarScope of its __Viftop handle var
+    RefToVarScopeFtaskPairsMap m_virtIfaceTargetsMap; // Call ref -> {handle vscp, per-scope ftask} runtime dispatch targets.
+                                                     // A virtual-interface method call is an exception to the "one ftask per
+                                                     // scope" rule: one AstNodeFTaskRef may dispatch to ftask clones under
+                                                     // several interface-instance scopes.
 
 public:
     // METHODS
@@ -182,7 +178,7 @@ public:
     // interface method call, or nullptr if no dispatch chain is needed.
     const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>* virtIfaceTargets(
         const AstNodeFTaskRef* refp) const {
-        const auto it = m_virtIfaceTargetsMap.find(refp->taskp());
+        const auto it = m_virtIfaceTargetsMap.find(refp);
         return it == m_virtIfaceTargetsMap.end() ? nullptr : &it->second;
     }
 
@@ -273,7 +269,7 @@ private:
              UINFO(0, "  ref " << refp->name() << " targets=" << targets.size());
             // Assert BEFORE the std::move empties 'targets'
             UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call");
-            if (targets.size() > 1) m_virtIfaceTargetsMap[refp->taskp()] = std::move(targets);
+            if (targets.size() > 1) m_virtIfaceTargetsMap[refp] = std::move(targets);
         }
     }
 
