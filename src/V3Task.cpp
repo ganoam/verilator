@@ -115,7 +115,7 @@ class TaskStateVisitor final : public VNVisitor {
     using FuncToClassMap = std::unordered_map<const AstNodeFTask*, AstClass*>;
     using ScopeToVarScopeMap = std::map<const AstScope*, AstVarScope*>;
     using RefToVarScopeFtaskPairsMap
-      = std::map<const AstNodeFTaskRef*, std::vector<std::pair<AstVarScope*, AstNodeFTask*>>>;
+        = std::map<const AstNodeFTaskRef*, std::vector<std::pair<AstVarScope*, AstNodeFTask*>>>;
     // MEMBERS
     VarToScopeMap m_varToScopeMap;  // Map for Var -> VarScope mappings
     FuncToClassMap m_funcToClassMap;  // Map for ctor func -> class
@@ -126,12 +126,19 @@ class TaskStateVisitor final : public VNVisitor {
     std::vector<AstInitialAutomatic*> m_initialps;  // Initial blocks to move
     bool m_underPortVar = false;  // Visiting under a port AstVar; any expression there
                                   // is a default value, evaluated at call sites only
-    std::vector<AstNodeFTaskRef*> m_virtIfaceRefs; // Virtual-interface method call refs seen during traversal
-    ScopeToVarScopeMap m_ifaceHandleVscpMap; // Iface scope -> VarScope of its __Viftop handle var
-    RefToVarScopeFtaskPairsMap m_virtIfaceTargetsMap; // Call ref -> {handle vscp, per-scope ftask} runtime dispatch targets.
-                                                     // A virtual-interface method call is an exception to the "one ftask per
-                                                     // scope" rule: one AstNodeFTaskRef may dispatch to ftask clones under
-                                                     // several interface-instance scopes.
+    // Virtual-interface method call refs seen during traversal
+    std::vector<AstNodeFTaskRef*>
+        m_virtIfaceRefs;
+    // Iface scope -> VarScope of its __Viftop handle var
+    ScopeToVarScopeMap m_ifaceHandleVscpMap;
+    // Call ref -> {handle vscp, per-scope ftask} runtime dispatch
+    // targets. A virtual-interface method call is an exception to the
+    // "one ftask per scope" rule: one AstNodeFTaskRef may dispatch to
+    // ftask clones under several interface-instance scopes.
+    RefToVarScopeFtaskPairsMap
+        m_virtIfaceTargetsMap;
+
+
 
 public:
     // METHODS
@@ -176,8 +183,8 @@ public:
     AstNode* checkImpure(AstNodeFTask* nodep) { return getFTaskVertex(nodep)->impureNode(); }
     // Returns per-scope {handle, ftask} dispatch targets for a virtual
     // interface method call, or nullptr if no dispatch chain is needed.
-    const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>* virtIfaceTargets(
-        const AstNodeFTaskRef* refp) const {
+    const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>*
+    virtIfaceTargets(const AstNodeFTaskRef* refp) const {
         const auto it = m_virtIfaceTargetsMap.find(refp);
         return it == m_virtIfaceTargetsMap.end() ? nullptr : &it->second;
     }
@@ -193,24 +200,10 @@ private:
     // target method as needing a non-inline CFunc and record the runtime
     // dispatch targets (iface __Viftop handle VarScope -> that clone).
     void markVirtIfaceTargets() {
-        UINFO(0, "markVirtIfaceTargets: " << m_virtIfaceRefs.size() << " viface refs, "
-                 << m_ifaceHandleVscpMap.size() << " iface handle vscps");
-        for (const auto& it : m_ifaceHandleVscpMap)
-            UINFO(0, "  handlevscp scope=" << it.first->name()
-                     << " vscp=" << it.second->name());
-        // Dump every ftask vertex once: names + scope, so we can see whether
-        // e.g. 'probe' clones exist, were renamed (__Vtcwrap), or lack user3p
         for (V3GraphVertex& vtx : m_callGraph.vertices()) {
             if (TaskFTaskVertex* const ftVtxp = vtx.cast<TaskFTaskVertex>()) {
                 AstNodeFTask* const ftaskp = ftVtxp->nodep();
                 const AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope);
-                UINFO(0, "  vtx ftask '" << ftaskp->name() << "'"
-                         << " user3p=" << (ftaskp->user3p() ? "set" : "null")
-                         << (scopep ? " scope=" + scopep->name() : "")
-                         << (scopep && scopep->modp()
-                                 ? " mod=" + scopep->modp()->name()
-                                     + (VN_IS(scopep->modp(), Iface) ? "(Iface)" : "")
-                                 : ""));
             }
         }
         for (AstNodeFTaskRef* const refp : m_virtIfaceRefs) {
@@ -218,56 +211,26 @@ private:
             const AstIfaceRefDType* const ifrefp
                 = VN_AS(mrefp->fromp()->dtypep()->skipRefp(), IfaceRefDType);
             const AstIface* const ifacep = ifrefp->ifaceViaCellp();
-            UINFO(0, "  ref '" << refp->name() << "' taskp='" << refp->taskp()->name()
-                     << "' iface=" << (ifacep ? ifacep->name() : string{"NULL"}));
             std::vector<std::pair<AstVarScope*, AstNodeFTask*>> targets;
             for (V3GraphVertex& vtx : m_callGraph.vertices()) {
-                 TaskFTaskVertex* const ftVtxp = vtx.cast<TaskFTaskVertex>();
-                 if (!ftVtxp) continue;
-                 AstNodeFTask* const ftaskp = ftVtxp->nodep();
+                TaskFTaskVertex* const ftVtxp = vtx.cast<TaskFTaskVertex>();
+                if (!ftVtxp) continue;
+                AstNodeFTask* const ftaskp = ftVtxp->nodep();
                 if (ftaskp->name() != refp->name()) {
                     if (ftaskp->name().find(refp->name()) != string::npos
                         || refp->name().find(ftaskp->name()) != string::npos)
-                        UINFO(0, "    near-miss name: ftask='" << ftaskp->name()
-                                 << "' ref='" << refp->name() << "'");
-                    continue;
+                        continue;
                 }
-                 AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope);
-                UINFO(0, "  cand " << ftaskp->name()
-                         << " user3p=" << (ftaskp->user3p() ? "set" : "null")
-                         << " scope=" << (scopep ? scopep->name() : "null")
-                         << " mod=" << (scopep && scopep->modp()
-                                          ? scopep->modp()->name() : "null")
-                         << " isIface="
-                         << (scopep && VN_IS(scopep->modp(), Iface) ? "y" : "n")
-                         << " want=" << ifacep->name());
-                if (!scopep) {
-                    UINFO(0, "    cand '" << ftaskp->name() << "' dropped: no user3p scope");
-                    continue;
-                }
-                if (!VN_IS(scopep->modp(), Iface)) {
-                    UINFO(0, "    cand '" << ftaskp->name() << "' dropped: modp="
-                             << (scopep->modp() ? scopep->modp()->name() : string{"null"})
-                             << " not Iface");
-                    continue;
-                }
-                if (scopep->modp()->name() != ifacep->name()) {
-                    UINFO(0, "    cand '" << ftaskp->name() << "' dropped: mod name='"
-                             << scopep->modp()->name() << "' want='" << ifacep->name() << "'");
-                    continue;
-                }
+                AstScope* const scopep = VN_CAST(ftaskp->user3p(), Scope);
+                if (!scopep) continue;
+                if (!VN_IS(scopep->modp(), Iface)) continue;
+                if (scopep->modp()->name() != ifacep->name()) continue;
                 ftVtxp->needsNonInlineCFunc(true);
 
                 const auto hit = m_ifaceHandleVscpMap.find(scopep);
-                if (hit == m_ifaceHandleVscpMap.end()) {
-                    UINFO(0, "    no __Viftop vscp for scope "
-                                 << scopep->name());
-                    continue;
-                }
+                if (hit == m_ifaceHandleVscpMap.end()) continue;
                 targets.emplace_back(hit->second, ftaskp);
-             }
-             UINFO(0, "  ref " << refp->name() << " targets=" << targets.size());
-            // Assert BEFORE the std::move empties 'targets'
+            }
             UASSERT_OBJ(!targets.empty(), refp, "no iface ftask clones for virtual call");
             if (targets.size() > 1) m_virtIfaceTargetsMap[refp] = std::move(targets);
         }
@@ -340,20 +303,12 @@ private:
                     UINFO(9, "   funcvsc " << vscp);
                     m_varToScopeMap.emplace(std::make_pair(nodep, varp), vscp);
                 }
-                if (varp->isIfaceParent()) {
-                    m_ifaceHandleVscpMap[vscp->scopep()] = vscp;
-                }
+                if (varp->isIfaceParent()) { m_ifaceHandleVscpMap[vscp->scopep()] = vscp; }
             }
         }
         // Likewise, all FTask->scope mappings
         for (AstNode* stmtp = nodep->blocksp(); stmtp; stmtp = stmtp->nextp()) {
             if (AstNodeFTask* const taskp = VN_CAST(stmtp, NodeFTask)) taskp->user3p(nodep);
-            if (AstNodeFTask* const taskp = VN_CAST(stmtp, NodeFTask)) {
-                taskp->user3p(nodep);
-                if (VN_IS(nodep->modp(), Iface))
-                     UINFO(0, "  stamp iface ftask '" << taskp->name()
-                             << "' scope=" << nodep->name());
-            }
         }
         iterateChildren(nodep);
     }
@@ -369,12 +324,6 @@ private:
             taskVtxp->needsNonInlineCFunc(true);
             m_virtIfaceRefs.push_back(nodep);
             const AstMethodCall* const mcallp = VN_AS(nodep, MethodCall);
-            UINFO(0, "  viface ref '" << nodep->name()
-                     << "' taskscope="
-                     << (nodep->taskp()->user3p()
-                             ? VN_AS(nodep->taskp()->user3p(), Scope)->name()
-                             : string{"NULL"})
-                     << " fromdt=" << mcallp->fromp()->dtypep()->skipRefp()->typeName());
         }
         // Do we have to disable inlining the function?
         const V3TaskConnects tconnects = V3Task::taskConnects(nodep, nodep->taskp()->stmtsp());
@@ -901,8 +850,6 @@ class TaskVisitor final : public VNVisitor {
         AstNode* callStmtp = nullptr;  // Stmt wrapper of ccallp, for dispatch replace
         const std::vector<std::pair<AstVarScope*, AstNodeFTask*>>* const vtargetsp
             = virtualIfaceCall ? m_statep->virtIfaceTargets(refp) : nullptr;
-        UINFO(0, "  lookup '" << refp->name() << "' refp=" << refp
-                 << " -> " << (vtargetsp ? cvtToStr(vtargetsp->size()) : "null"));
         if (VN_IS(refp, New)) {
             AstCNew* const cnewp = new AstCNew{refp->fileline(), cfuncp};
             cnewp->dtypep(refp->dtypep());
@@ -965,7 +912,7 @@ class TaskVisitor final : public VNVisitor {
 
         if (vtargetsp && callStmtp) {
             // Dispatch on the runtime vif handle: 'vif == <instance __Viftop>'
-            // picks that instance's own CFunc, whose scope context (%m etc.)
+            // picks that instance's own CFunc, whose scope context
             // is correct. The final else calls the last target's CFunc.
             AstCMethodCall* const mcallp = static_cast<AstCMethodCall*>(ccallp);
             AstIf* ifp = nullptr;
@@ -984,13 +931,14 @@ class TaskVisitor final : public VNVisitor {
                 condp->dtypeSetBit();
                 AstIf* const newIfp = new AstIf{flp, condp};
                 newIfp->addThensp(callp->makeStmt());
-                if (lastp) lastp->addElsesp(newIfp);
-                else ifp = newIfp;
+                if (lastp)
+                    lastp->addElsesp(newIfp);
+                else
+                    ifp = newIfp;
                 lastp = newIfp;
             }
             // Last target becomes the final 'else' branch using the original call
-            AstCFunc* const lastCFuncp
-                = m_statep->ftaskCFuncp(vtargetsp->back().second);
+            AstCFunc* const lastCFuncp = m_statep->ftaskCFuncp(vtargetsp->back().second);
             UASSERT_OBJ(lastCFuncp, vtargetsp->back().second, "no per-scope cfunc");
             mcallp->funcp(lastCFuncp);
             // Swap in the dispatch chain, then reuse the original AstExprStmt
@@ -998,12 +946,6 @@ class TaskVisitor final : public VNVisitor {
             callStmtp->replaceWith(ifp);
             lastp->addElsesp(callStmtp);
         }
-
-        UINFO(0, "  nitask '" << refp->name() << "' vtargets="
-                 << (vtargetsp ? cvtToStr(vtargetsp->size()) : string{"null"})
-                 << " callStmtp=" << (callStmtp ? "set" : "null"));
-        if (debug() >= 9 || vtargetsp) beginp->dumpTreeAndNext(cout, "-  nitask: ");
-
         if (debug() >= 9) beginp->dumpTreeAndNext(cout, "-  nitask: ");
         return beginp;
     }
@@ -2010,11 +1952,6 @@ class TaskVisitor final : public VNVisitor {
         const bool virtualIfaceCall
             = TaskStateVisitor::isVirtualIfaceMethodCall(nodep)
               && TaskStateVisitor::isIfaceFTaskScope(m_statep->getScope(nodep->taskp()));
-        UINFO(0, "  ref '" << nodep->name() << "' vicall=" << (int)virtualIfaceCall
-                 << " isVIM=" << (int)TaskStateVisitor::isVirtualIfaceMethodCall(nodep)
-                 << " taskscope=" << m_statep->getScope(nodep->taskp())->name()
-                 << " noInline=" << (int)m_statep->ftaskNoInline(nodep->taskp()));
-
         if (m_statep->ftaskNoInline(nodep->taskp()) || virtualIfaceCall) {
             processArgs(nodep);
             // This may share VarScope's with a public task, if any.  Yuk.
